@@ -1,193 +1,202 @@
-const WebSocket = require("ws");
-const PORT = process.env.PORT || 3000;
+// server.js - Complete Delhi Monopoly Backend
+const WebSocket = require('ws');
+
+const PORT = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port: PORT });
+console.log("Delhi Monopoly Backend running on port", PORT);
 
-// Unique tokens for up to 6 players
-const TOKENS = ["🛺","🚇","🚌","🚗","🛵","🚲"];
+// ===== Game Data =====
+let rooms = {}; // roomName -> gameState
 
-let rooms = {};
+// ===== Helper Functions =====
+function randomDice() { return [1+Math.floor(Math.random()*6),1+Math.floor(Math.random()*6)]; }
 
-function createBoard() {
-  const board = [];
-  for (let i = 0; i < 40; i++) {
-    if (i === 0) board.push({ name: "GO", type: "go" });
-    else if (i === 10) board.push({ name: "Jail", type: "jail" });
-    else if (i === 20) board.push({ name: "Free Parking", type: "free" });
-    else if (i === 30) board.push({ name: "Go To Jail", type: "go_to_jail" });
-    else if (i % 5 === 0) board.push({ name: "Tax", type: "tax", amount: 1000 });
-    else if (i % 3 === 0) board.push({ name: "Chance", type: "chance" });
-    else board.push({
-      name: "Delhi Area " + i,
-      price: 2000 + i * 10,
-      rent: 300 + i * 5,
-      owner: null,
-      mortgaged: false,
-      houses: 0,
-      hotel: false
-    });
-  }
-  return board;
+function broadcast(roomName,data){
+  if(!rooms[roomName]) return;
+  rooms[roomName].players.forEach(p=>{
+    if(p.ws && p.ws.readyState===WebSocket.OPEN) p.ws.send(JSON.stringify(data));
+  });
 }
 
-const chanceCards = [
-  { text: "Metro Expansion", effect: (p, dice) => { p.money += dice >= 10 ? 2000 : 800; } },
-  { text: "Illegal Fine", effect: (p, dice) => { p.money -= dice <= 4 ? 1200 : 400; } },
-  { text: "Go To Jail", effect: (p, dice) => { p.pos = 10; p.inJail = true; p.jailTurns = 0; } }
+function nextTurn(game){
+  let idx = game.turnIndex;
+  do {
+    idx = (idx+1) % game.players.length;
+  } while(game.players[idx].bankrupt);
+  game.turnIndex = idx;
+  game.turn = game.players[idx].id;
+}
+
+// ===== Delhi Board Properties =====
+const delhiProperties=[
+  {name:"GO",type:"dark",price:null},{name:"Connaught Place",type:"light",price:1500},{name:"Income Tax",type:"medium",price:null},{name:"Karol Bagh",type:"light",price:1600},
+  {name:"Chance",type:"medium",price:null},{name:"Lajpat Nagar",type:"light",price:1800},{name:"Chandni Chowk",type:"light",price:2000},{name:"Jail (Visiting)",type:"dark",price:null},
+  {name:"Rajouri Garden",type:"light",price:2200},{name:"Free Parking",type:"dark",price:null},{name:"Punjabi Bagh",type:"light",price:2400},{name:"Nehru Place",type:"light",price:2600},
+  {name:"Chance",type:"medium",price:null},{name:"Hauz Khas",type:"light",price:2800},{name:"Anand Vihar",type:"light",price:3000},{name:"Go to Jail",type:"dark",price:null},
+  {name:"Vasant Kunj",type:"light",price:3200},{name:"Saket",type:"light",price:3400},{name:"Dilli Haat",type:"light",price:3600},{name:"Chance",type:"medium",price:null},
+  {name:"RK Puram",type:"light",price:3800},{name:"Dwarka",type:"light",price:4000},{name:"Income Tax",type:"medium",price:null},{name:"Chanakyapuri",type:"light",price:4200},
+  {name:"Free Parking",type:"dark",price:null},{name:"Rohini",type:"light",price:4400},{name:"Mayur Vihar",type:"light",price:4500},{name:"Chance",type:"medium",price:null},
+  {name:"Lodhi Road",type:"light",price:2200},{name:"Inderlok",type:"light",price:2000},{name:"Go to Jail",type:"dark",price:null},{name:"Pitampura",type:"light",price:1800},
+  {name:"Rajiv Chowk",type:"light",price:1600},{name:"Chhatarpur",type:"light",price:1400},{name:"Chance",type:"medium",price:null},{name:"Safdarjung",type:"light",price:1200},
+  {name:"Hauz Khas Village",type:"light",price:1300},{name:"Income Tax",type:"medium",price:null},{name:"Connaught Place Extension",type:"light",price:1500},{name:"Free Parking",type:"dark",price:null}
 ];
 
-function broadcast(room) {
-  room.players.forEach(p => {
-    p.ws.send(JSON.stringify({
-      board: room.board,
-      players: room.players.map(x => ({
-        pos: x.pos,
-        money: x.money,
-        token: x.token,
-        id: x.id
-      })),
-      turn: room.turn
-    }));
-  });
-}
-
-function checkBankruptcy(room, pid) {
-  const p = room.players.find(x => x.id === pid);
-  const ownsAssets = room.board.some(c => c.owner === pid && !c.mortgaged);
-  if (p.money < 0 && !ownsAssets) {
-    room.board.forEach(c => { if (c.owner === pid) { c.owner = null; c.mortgaged = false; } });
-    room.players = room.players.filter(x => x.id !== pid);
-    if (room.turn >= pid) room.turn = 0;
+// ===== Create Room =====
+function createRoom(roomName,maxPlayers){
+  if(rooms[roomName]) return rooms[roomName];
+  const board = delhiProperties.map(p=>({...p,owner:null,houses:0,hotel:false,mortgaged:false}));
+  const players=[];
+  for(let i=0;i<maxPlayers;i++){
+    players.push({id:i,pos:0,money:5000,jailTurns:0,inJail:false,bankrupt:false,ws:null});
   }
+  rooms[roomName]={board,players,turnIndex:0,turn:0,roomName,dice:[1,1]};
+  rooms[roomName].turn = 0;
+  return rooms[roomName];
 }
 
-wss.on("connection", ws => {
-  ws.on("message", msg => {
-    const data = JSON.parse(msg);
+// ===== WebSocket Handlers =====
+function handleJoin(ws,msg){
+  const roomName = msg.room || "default";
+  const maxPlayers = msg.max || 2;
+  const game = createRoom(roomName,maxPlayers);
+  const player = game.players.find(p=>!p.ws);
+  if(!player){ ws.send(JSON.stringify({error:"Room full"})); return; }
+  player.ws=ws; ws.playerId=player.id; ws.roomName=roomName;
+  ws.send(JSON.stringify({...game,you:player.id}));
+  broadcast(roomName,{...game,you:player.id});
+}
 
-    if (data.type === "join") {
-      if (!rooms[data.room]) rooms[data.room] = { players: [], board: createBoard(), turn: 0, max: data.max };
-      const room = rooms[data.room];
-      if (room.players.length >= room.max) return;
+// ===== Player Actions =====
+function handleRoll(ws){
+  const game = rooms[ws.roomName];
+  if(game.turn !== ws.playerId) return;
+  const player = game.players[ws.playerId];
+  if(player.bankrupt) return;
 
-      const id = room.players.length;
-      room.players.push({
-        ws,
-        id,
-        pos: 0,
-        money: 15000,
-        inJail: false,
-        jailTurns: 0,
-        doubles: 0,
-        token: TOKENS[id]
-      });
+  const dice = randomDice();
+  game.dice = dice;
 
-      ws.room = data.room;
-      ws.id = id;
-      broadcast(room);
+  // Jail logic
+  if(player.inJail){
+    if(dice[0]===dice[1]){
+      player.inJail=false; player.jailTurns=0;
+    } else {
+      player.jailTurns++;
+      if(player.jailTurns>=3){ player.inJail=false; player.jailTurns=0; player.money-=300; }
+      broadcast(ws.roomName,{...game,chance:`Player ${player.id} is in Jail`});
+      nextTurn(game); return;
     }
+  }
 
-    if (data.type === "roll") {
-      const room = rooms[ws.room];
-      if (room.turn !== ws.id) return;
-      const p = room.players.find(x => x.id === ws.id);
+  let steps = dice[0]+dice[1];
+  let passedGo=false;
+  for(let s=0;s<steps;s++){
+    player.pos = (player.pos+1)%40;
+    if(player.pos===0) passedGo=true;
+  }
+  if(passedGo) player.money += 2000;
 
-      if (p.inJail) {
-        const d1 = Math.floor(Math.random() * 6) + 1;
-        const d2 = Math.floor(Math.random() * 6) + 1;
-        if (d1 === d2) {
-          p.inJail = false;
-          p.jailTurns = 0;
-        } else {
-          p.jailTurns++;
-          if (p.jailTurns >= 3) {
-            p.money -= 1000;
-            p.inJail = false;
-            p.jailTurns = 0;
-            room.turn = (room.turn + 1) % room.players.length;
-            broadcast(room);
-            return;
-          } else {
-            room.turn = (room.turn + 1) % room.players.length;
-            broadcast(room);
-            return;
-          }
-        }
-      }
+  const tile = game.board[player.pos];
+  let chanceMsg=null;
 
-      const dice1 = Math.floor(Math.random() * 6) + 1;
-      const dice2 = Math.floor(Math.random() * 6) + 1;
-      const total = dice1 + dice2;
+  if(tile.type==="medium"){ // Chance/Tax
+    const effect = [-500,-300,300,500,0][Math.floor(Math.random()*5)];
+    player.money+=effect;
+    chanceMsg=`Chance/Tax: ${effect>=0?"+₹"+effect:"-₹"+(-effect)}`;
+  }
 
-      p.pos = (p.pos + total) % 40;
-      if (p.pos + total >= 40) p.money += 2000;
+  // Rent
+  if(tile.owner!==null && tile.owner!==player.id && !tile.mortgaged){
+    let rent = tile.price/5;
+    if(tile.houses) rent+=tile.houses*50;
+    if(tile.hotel) rent+=200;
+    player.money-=rent;
+    game.players[tile.owner].money+=rent;
+    if(player.money<0) player.bankrupt=true;
+  }
 
-      const cell = room.board[p.pos];
+  // Go to Jail
+  if(tile.name.includes("Go to Jail")){ player.inJail=true; player.jailTurns=0; player.pos=9; chanceMsg="Go to Jail!"; }
 
-      if (cell.type === "tax") p.money -= cell.amount;
-      if (cell.type === "go_to_jail") { p.pos = 10; p.inJail = true; p.jailTurns = 0; }
-      if (cell.type === "chance") { chanceCards[Math.floor(Math.random() * chanceCards.length)].effect(p, total); }
+  broadcast(ws.roomName,{...game,chance:chanceMsg});
+  if(dice[0]!==dice[1]) nextTurn(game);
+}
 
-      if (cell.price) {
-        if (cell.owner === null && p.money >= cell.price) { cell.owner = p.id; p.money -= cell.price; }
-        else if (cell.owner !== p.id && !cell.mortgaged) {
-          const owner = room.players.find(x => x.id === cell.owner);
-          let rent = cell.rent + (cell.houses * 50) + (cell.hotel ? 200 : 0);
-          p.money -= rent;
-          owner.money += rent;
-        }
-      }
+function handleBuy(ws){
+  const game=rooms[ws.roomName]; const player=game.players[ws.playerId];
+  const tile=game.board[player.pos];
+  if(tile.price && tile.owner===null && player.money>=tile.price){
+    tile.owner=player.id; player.money-=tile.price;
+  }
+  broadcast(ws.roomName,{...game});
+}
 
-      room.turn = (dice1 === dice2) ? room.turn : (room.turn + 1) % room.players.length;
+function handleSell(ws){
+  const game=rooms[ws.roomName]; const player=game.players[ws.playerId];
+  const tile=game.board[player.pos];
+  if(tile.owner===player.id){
+    player.money+=Math.floor(tile.price/2); tile.owner=null; tile.houses=0; tile.hotel=false;
+  }
+  broadcast(ws.roomName,{...game});
+}
 
-      checkBankruptcy(room, ws.id);
-      broadcast(room);
-    }
+function handleMortgage(ws){
+  const game=rooms[ws.roomName]; const player=game.players[ws.playerId];
+  const tile=game.board[player.pos];
+  if(tile.owner===player.id && !tile.mortgaged){ tile.mortgaged=true; player.money+=Math.floor(tile.price/2); }
+  broadcast(ws.roomName,{...game});
+}
 
-    if (data.type === "trade") {
-      const room = rooms[ws.room];
-      const from = room.players.find(x => x.id === data.from);
-      const to = room.players.find(x => x.id === data.to);
-      const prop = room.board[data.property];
-      if (prop.owner === from.id) { prop.owner = to.id; from.money -= data.money; to.money += data.money; broadcast(room); }
-    }
+function handleUnmortgage(ws){
+  const game=rooms[ws.roomName]; const player=game.players[ws.playerId];
+  const tile=game.board[player.pos];
+  const cost = Math.floor(tile.price/2*1.1);
+  if(tile.owner===player.id && tile.mortgaged && player.money>=cost){ tile.mortgaged=false; player.money-=cost; }
+  broadcast(ws.roomName,{...game});
+}
 
-    if (data.type === "mortgage") {
-      const room = rooms[ws.room];
-      const prop = room.board[data.property];
-      const p = room.players.find(x => x.id === ws.id);
-      if (prop.owner === p.id && !prop.mortgaged) { prop.mortgaged = true; p.money += Math.floor(prop.price / 2); broadcast(room); }
-    }
-    
-    if (data.type === "unmortgage") {
-      const room = rooms[ws.room];
-      const prop = room.board[data.property];
-      const p = room.players.find(x => x.id === ws.id);
-      if (prop.owner === p.id && prop.mortgaged && p.money >= Math.floor(prop.price * 0.55)) { p.money -= Math.floor(prop.price * 0.55); prop.mortgaged = false; broadcast(room); }
-    }
+function handleBuildHouse(ws){
+  const game=rooms[ws.roomName]; const player=game.players[ws.playerId];
+  const tile=game.board[player.pos];
+  if(tile.owner===player.id && tile.houses<4 && player.money>=Math.floor(tile.price/4)){
+    tile.houses++; player.money-=Math.floor(tile.price/4);
+  }
+  broadcast(ws.roomName,{...game});
+}
 
-    if (data.type === "build") {
-      const room = rooms[ws.room];
-      const prop = room.board[data.property];
-      const p = room.players.find(x => x.id === ws.id);
-      if (prop.owner === p.id && !prop.hotel && p.money >= 500) {
-        if (prop.houses < 4) { prop.houses++; p.money -= 500; }
-        else { prop.houses = 0; prop.hotel = true; p.money -= 1000; }
-        broadcast(room);
-      }
-    }
+function handleBuildHotel(ws){
+  const game=rooms[ws.roomName]; const player=game.players[ws.playerId];
+  const tile=game.board[player.pos];
+  if(tile.owner===player.id && tile.houses===4 && !tile.hotel && player.money>=tile.price){
+    tile.hotel=true; tile.houses=0; player.money-=tile.price;
+  }
+  broadcast(ws.roomName,{...game});
+}
 
-    if (data.type === "sellHouseHotel") {
-      const room = rooms[ws.room];
-      const prop = room.board[data.property];
-      const p = room.players.find(x => x.id === ws.id);
-      if (prop.owner === p.id) {
-        if (prop.hotel) { prop.hotel = false; p.money += 500; }
-        else if (prop.houses > 0) { prop.houses--; p.money += 250; }
-        broadcast(room);
-      }
-    }
+// Trade placeholder
+function handleTrade(ws,msg){
+  const game = rooms[ws.roomName];
+  broadcast(ws.roomName,{...game,chance:`Trade requested with player ${msg.with}`});
+}
+
+// ===== WebSocket Connection =====
+wss.on('connection', function(ws){
+  ws.on('message', function(raw){
+    let msg;
+    try{ msg=JSON.parse(raw);}catch(e){return;}
+    if(msg.type==="join") handleJoin(ws,msg);
+    else if(msg.type==="roll") handleRoll(ws);
+    else if(msg.type==="buy") handleBuy(ws);
+    else if(msg.type==="sell") handleSell(ws);
+    else if(msg.type==="mortgage") handleMortgage(ws);
+    else if(msg.type==="unmortgage") handleUnmortgage(ws);
+    else if(msg.type==="buildHouse") handleBuildHouse(ws);
+    else if(msg.type==="buildHotel") handleBuildHotel(ws);
+    else if(msg.type==="trade") handleTrade(ws,msg);
+  });
+
+  ws.on('close', ()=>{
+    const game = rooms[ws.roomName]; if(!game) return;
+    const player = game.players[ws.playerId]; if(player) player.ws=null;
   });
 });
-
-console.log("WebSocket Server running on port", PORT);
-
