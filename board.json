@@ -1,0 +1,7 @@
+[
+  { "name": "START", "type": "start" },
+  { "name": "Delhi Railway", "type": "property", "price": 200, "rent": 25, "owner": null },
+  { "name": "Chance", "type": "chance" },
+  { "name": "Mumbai Railway", "type": "property", "price": 300, "rent": 35, "owner": null },
+  { "name": "Tax", "type": "tax", "amount": 100 }
+]
