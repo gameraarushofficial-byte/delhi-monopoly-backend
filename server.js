@@ -1,43 +1,111 @@
-const WebSocket = require("ws");
-const GameEngine = require("./gameEngine");
-const { uuid } = require("./utils");
+import express from "express";
+import http from "http";
+import { WebSocketServer } from "ws";
+import { v4 as uuidv4 } from "uuid";
 
-const wss = new WebSocket.Server({ port: process.env.PORT || 8080 });
-const game = new GameEngine();
+const app = express();
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
 
-wss.on("connection", ws => {
-  ws.on("message", msg => {
-    const data = JSON.parse(msg);
+app.use(express.json());
 
+/* ------------------ GAME STATE ------------------ */
+
+const players = {};
+let turnOrder = [];
+let currentTurnIndex = 0;
+
+const INITIAL_MONEY = 15000;
+
+/* ------------------ WEBSOCKET ------------------ */
+
+wss.on("connection", (ws) => {
+  const playerId = uuidv4();
+
+  players[playerId] = {
+    id: playerId,
+    name: null,
+    money: INITIAL_MONEY,
+    position: 0,
+    inJail: false,
+    jailTurns: 0
+  };
+
+  ws.send(
+    JSON.stringify({
+      type: "CONNECTED",
+      playerId
+    })
+  );
+
+  ws.on("message", (msg) => {
+    let data;
+    try {
+      data = JSON.parse(msg);
+    } catch {
+      return;
+    }
+
+    /* ---- JOIN GAME ---- */
     if (data.type === "JOIN") {
-      const player = {
-        id: uuid(),
-        name: data.name,
-        money: 15000,
-        position: 0,
-        inJail: false
-      };
-      game.addPlayer(player);
-      ws.playerId = player.id;
+      players[playerId].name = data.name;
+      turnOrder.push(playerId);
 
-      ws.send(JSON.stringify({ type: "JOINED", player }));
+      broadcast({
+        type: "PLAYERS_UPDATE",
+        players,
+        turnOrder,
+        currentTurnIndex
+      });
     }
 
-    if (data.type === "ROLL") {
-      try {
-        const result = game.roll(ws.playerId);
-        broadcast({ type: "ROLL_RESULT", result });
-      } catch (e) {
-        ws.send(JSON.stringify({ type: "ERROR", message: e }));
-      }
+    /* ---- ROLL DICE ---- */
+    if (data.type === "ROLL_DICE") {
+      const currentPlayerId = turnOrder[currentTurnIndex];
+      if (playerId !== currentPlayerId) return;
+
+      const d1 = Math.ceil(Math.random() * 6);
+      const d2 = Math.ceil(Math.random() * 6);
+      const steps = d1 + d2;
+
+      players[playerId].position =
+        (players[playerId].position + steps) % 40;
+
+      currentTurnIndex =
+        (currentTurnIndex + 1) % turnOrder.length;
+
+      broadcast({
+        type: "DICE_ROLL",
+        dice: [d1, d2],
+        playerId,
+        position: players[playerId].position,
+        currentTurnIndex
+      });
     }
+  });
+
+  ws.on("close", () => {
+    delete players[playerId];
+    turnOrder = turnOrder.filter((id) => id !== playerId);
   });
 });
 
+/* ------------------ HELPERS ------------------ */
+
 function broadcast(data) {
-  wss.clients.forEach(c => {
-    if (c.readyState === WebSocket.OPEN) {
-      c.send(JSON.stringify(data));
+  const msg = JSON.stringify(data);
+  wss.clients.forEach((client) => {
+    if (client.readyState === 1) {
+      client.send(msg);
     }
   });
 }
+
+/* ------------------ START SERVER ------------------ */
+/* 🔴 THIS IS THE PART RAILWAY NEEDS */
+
+const PORT = process.env.PORT || 3000;
+
+server.listen(PORT, () => {
+  console.log("✅ Server running on port", PORT);
+});
