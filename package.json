@@ -1,1 +1,19 @@
+{
+  "name": "delhi-monopoly-backend",
+  "version": "1.0.0",
+  "description": "Multiplayer Monopoly Game Backend",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.16.0",
+    "uuid": "^9.0.1"
+  }
+}
 
