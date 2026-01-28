@@ -1,111 +1,152 @@
-import express from "express";
+import WebSocket, { WebSocketServer } from "ws";
 import http from "http";
-import { WebSocketServer } from "ws";
-import { v4 as uuidv4 } from "uuid";
 
-const app = express();
-const server = http.createServer(app);
+const server = http.createServer();
 const wss = new WebSocketServer({ server });
 
-app.use(express.json());
+/* =========================
+   GLOBAL GAME STATE
+========================= */
+const gameState = {
+  players: {},          // socketId -> player
+  order: [],            // turn order
+  currentTurn: 0,
+  started: false,
+  board: [],            // 40 tiles
+};
 
-/* ------------------ GAME STATE ------------------ */
+/* =========================
+   INIT BOARD (ONCE)
+========================= */
+function initBoard() {
+  if (gameState.board.length) return;
 
-const players = {};
-let turnOrder = [];
-let currentTurnIndex = 0;
+  const names = [
+    "GO","Connaught Place","Chance","Karol Bagh","Income Tax",
+    "New Delhi Station","Rajendra Place","Chance","Patel Nagar","Jail",
+    "Rajouri Garden","Electric Company","Janakpuri","Tilak Nagar","DTDC",
+    "Punjabi Bagh","Chance","Pitampura","Luxury Tax","Free Parking",
+    "Rohini","Chance","Model Town","Water Works","Civil Lines",
+    "Kashmere Gate","Vasant Kunj","Chance","Saket","Go To Jail",
+    "Greater Kailash","Dwarka","Chance","Noida","DTDC",
+    "Gurgaon","Chance","Faridabad","Super Tax"
+  ];
 
-const INITIAL_MONEY = 15000;
+  names.forEach((name, i) => {
+    gameState.board.push({
+      id: i,
+      name,
+      price: name.includes("Chance") || name.includes("Tax") || name.includes("Jail") || name === "GO"
+        ? 0
+        : 1200 + (i * 80),
+      owner: null,
+      mortgaged: false,
+      houses: 0,
+      hotel: false
+    });
+  });
+}
 
-/* ------------------ WEBSOCKET ------------------ */
+initBoard();
 
-wss.on("connection", (ws) => {
-  const playerId = uuidv4();
+/* =========================
+   HELPERS
+========================= */
+function broadcast(data) {
+  const msg = JSON.stringify(data);
+  wss.clients.forEach(c => {
+    if (c.readyState === WebSocket.OPEN) c.send(msg);
+  });
+}
 
-  players[playerId] = {
-    id: playerId,
-    name: null,
-    money: INITIAL_MONEY,
-    position: 0,
-    inJail: false,
-    jailTurns: 0
-  };
+function currentPlayer() {
+  return gameState.players[gameState.order[gameState.currentTurn]];
+}
 
-  ws.send(
-    JSON.stringify({
-      type: "CONNECTED",
-      playerId
-    })
-  );
+/* =========================
+   WEBSOCKET
+========================= */
+wss.on("connection", ws => {
+  ws.id = crypto.randomUUID();
 
-  ws.on("message", (msg) => {
-    let data;
-    try {
-      data = JSON.parse(msg);
-    } catch {
-      return;
+  ws.on("message", raw => {
+    const msg = JSON.parse(raw);
+
+    /* JOIN */
+    if (msg.type === "JOIN") {
+      if (gameState.players[ws.id]) return;
+
+      gameState.players[ws.id] = {
+        id: ws.id,
+        name: msg.name,
+        money: 15000,
+        position: 0,
+        jailed: false,
+        jailTurns: 0,
+        properties: []
+      };
+
+      gameState.order.push(ws.id);
+
+      broadcast({ type: "STATE", gameState });
     }
 
-    /* ---- JOIN GAME ---- */
-    if (data.type === "JOIN") {
-      players[playerId].name = data.name;
-      turnOrder.push(playerId);
+    /* ROLL */
+    if (msg.type === "ROLL") {
+      const player = currentPlayer();
+      if (!player || player.id !== ws.id) return;
 
-      broadcast({
-        type: "PLAYERS_UPDATE",
-        players,
-        turnOrder,
-        currentTurnIndex
-      });
-    }
-
-    /* ---- ROLL DICE ---- */
-    if (data.type === "ROLL_DICE") {
-      const currentPlayerId = turnOrder[currentTurnIndex];
-      if (playerId !== currentPlayerId) return;
-
-      const d1 = Math.ceil(Math.random() * 6);
-      const d2 = Math.ceil(Math.random() * 6);
+      const d1 = 1 + Math.floor(Math.random() * 6);
+      const d2 = 1 + Math.floor(Math.random() * 6);
       const steps = d1 + d2;
 
-      players[playerId].position =
-        (players[playerId].position + steps) % 40;
+      let oldPos = player.position;
+      player.position = (player.position + steps) % 40;
 
-      currentTurnIndex =
-        (currentTurnIndex + 1) % turnOrder.length;
+      if (player.position < oldPos) {
+        player.money += 2000; // GO bonus
+      }
+
+      const tile = gameState.board[player.position];
+
+      // Rent
+      if (tile.owner && tile.owner !== player.id && !tile.mortgaged) {
+        const rent = Math.floor(tile.price * 0.2);
+        player.money -= rent;
+        gameState.players[tile.owner].money += rent;
+      }
+
+      gameState.currentTurn =
+        (gameState.currentTurn + 1) % gameState.order.length;
 
       broadcast({
-        type: "DICE_ROLL",
-        dice: [d1, d2],
-        playerId,
-        position: players[playerId].position,
-        currentTurnIndex
+        type: "ROLL_RESULT",
+        d1, d2,
+        gameState
       });
+    }
+
+    /* BUY */
+    if (msg.type === "BUY") {
+      const player = currentPlayer();
+      const tile = gameState.board[player.position];
+
+      if (!tile.owner && tile.price > 0 && player.money >= tile.price) {
+        player.money -= tile.price;
+        tile.owner = player.id;
+        player.properties.push(tile.id);
+      }
+
+      broadcast({ type: "STATE", gameState });
     }
   });
 
   ws.on("close", () => {
-    delete players[playerId];
-    turnOrder = turnOrder.filter((id) => id !== playerId);
+    delete gameState.players[ws.id];
+    gameState.order = gameState.order.filter(id => id !== ws.id);
+    broadcast({ type: "STATE", gameState });
   });
 });
 
-/* ------------------ HELPERS ------------------ */
-
-function broadcast(data) {
-  const msg = JSON.stringify(data);
-  wss.clients.forEach((client) => {
-    if (client.readyState === 1) {
-      client.send(msg);
-    }
-  });
-}
-
-/* ------------------ START SERVER ------------------ */
-/* 🔴 THIS IS THE PART RAILWAY NEEDS */
-
-const PORT = process.env.PORT || 3000;
-
-server.listen(PORT, () => {
-  console.log("✅ Server running on port", PORT);
-});
+server.listen(process.env.PORT || 3000);
+console.log("Server running");
