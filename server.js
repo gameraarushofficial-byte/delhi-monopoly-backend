@@ -1,152 +1,96 @@
-import WebSocket, { WebSocketServer } from "ws";
-import http from "http";
+import express from "express";
+import { WebSocketServer } from "ws";
+import { v4 as uuid } from "uuid";
+import { board } from "./boardData.js";
 
-const server = http.createServer();
+const app = express();
+const server = app.listen(process.env.PORT || 3000);
 const wss = new WebSocketServer({ server });
 
-/* =========================
-   GLOBAL GAME STATE
-========================= */
-const gameState = {
-  players: {},          // socketId -> player
-  order: [],            // turn order
-  currentTurn: 0,
-  started: false,
-  board: [],            // 40 tiles
-};
+const players = {};
+let turnOrder = [];
+let currentTurn = 0;
 
-/* =========================
-   INIT BOARD (ONCE)
-========================= */
-function initBoard() {
-  if (gameState.board.length) return;
-
-  const names = [
-    "GO","Connaught Place","Chance","Karol Bagh","Income Tax",
-    "New Delhi Station","Rajendra Place","Chance","Patel Nagar","Jail",
-    "Rajouri Garden","Electric Company","Janakpuri","Tilak Nagar","DTDC",
-    "Punjabi Bagh","Chance","Pitampura","Luxury Tax","Free Parking",
-    "Rohini","Chance","Model Town","Water Works","Civil Lines",
-    "Kashmere Gate","Vasant Kunj","Chance","Saket","Go To Jail",
-    "Greater Kailash","Dwarka","Chance","Noida","DTDC",
-    "Gurgaon","Chance","Faridabad","Super Tax"
-  ];
-
-  names.forEach((name, i) => {
-    gameState.board.push({
-      id: i,
-      name,
-      price: name.includes("Chance") || name.includes("Tax") || name.includes("Jail") || name === "GO"
-        ? 0
-        : 1200 + (i * 80),
-      owner: null,
-      mortgaged: false,
-      houses: 0,
-      hotel: false
-    });
-  });
-}
-
-initBoard();
-
-/* =========================
-   HELPERS
-========================= */
 function broadcast(data) {
-  const msg = JSON.stringify(data);
   wss.clients.forEach(c => {
-    if (c.readyState === WebSocket.OPEN) c.send(msg);
+    if (c.readyState === 1) c.send(JSON.stringify(data));
   });
 }
 
-function currentPlayer() {
-  return gameState.players[gameState.order[gameState.currentTurn]];
-}
-
-/* =========================
-   WEBSOCKET
-========================= */
 wss.on("connection", ws => {
-  ws.id = crypto.randomUUID();
+  ws.on("message", msg => {
+    const data = JSON.parse(msg);
 
-  ws.on("message", raw => {
-    const msg = JSON.parse(raw);
-
-    /* JOIN */
-    if (msg.type === "JOIN") {
-      if (gameState.players[ws.id]) return;
-
-      gameState.players[ws.id] = {
-        id: ws.id,
-        name: msg.name,
+    // JOIN
+    if (data.type === "join") {
+      const id = uuid();
+      players[id] = {
+        id,
+        name: data.name,
+        password: data.password,
         money: 15000,
-        position: 0,
-        jailed: false,
-        jailTurns: 0,
-        properties: []
+        position: 0
       };
+      turnOrder.push(id);
+      ws.playerId = id;
 
-      gameState.order.push(ws.id);
+      ws.send(JSON.stringify({
+        type: "joined",
+        playerId: id,
+        players,
+        board,
+        turn: turnOrder[currentTurn]
+      }));
 
-      broadcast({ type: "STATE", gameState });
+      broadcast({ type: "update", players, board });
     }
 
-    /* ROLL */
-    if (msg.type === "ROLL") {
-      const player = currentPlayer();
-      if (!player || player.id !== ws.id) return;
+    // ROLL
+    if (data.type === "roll") {
+      if (turnOrder[currentTurn] !== ws.playerId) return;
 
-      const d1 = 1 + Math.floor(Math.random() * 6);
-      const d2 = 1 + Math.floor(Math.random() * 6);
-      const steps = d1 + d2;
+      const dice1 = Math.ceil(Math.random() * 6);
+      const dice2 = Math.ceil(Math.random() * 6);
+      const steps = dice1 + dice2;
 
-      let oldPos = player.position;
-      player.position = (player.position + steps) % 40;
+      const p = players[ws.playerId];
+      p.position = (p.position + steps) % board.length;
 
-      if (player.position < oldPos) {
-        player.money += 2000; // GO bonus
+      const tile = board[p.position];
+
+      // GO bonus
+      if (p.position < steps) p.money += 1500;
+
+      // PROPERTY
+      if (tile.price && tile.owner && tile.owner !== p.id) {
+        p.money -= tile.rent;
+        players[tile.owner].money += tile.rent;
       }
 
-      const tile = gameState.board[player.position];
-
-      // Rent
-      if (tile.owner && tile.owner !== player.id && !tile.mortgaged) {
-        const rent = Math.floor(tile.price * 0.2);
-        player.money -= rent;
-        gameState.players[tile.owner].money += rent;
-      }
-
-      gameState.currentTurn =
-        (gameState.currentTurn + 1) % gameState.order.length;
+      currentTurn = (currentTurn + 1) % turnOrder.length;
 
       broadcast({
-        type: "ROLL_RESULT",
-        d1, d2,
-        gameState
+        type: "rolled",
+        dice1,
+        dice2,
+        players,
+        board,
+        turn: turnOrder[currentTurn]
       });
     }
 
-    /* BUY */
-    if (msg.type === "BUY") {
-      const player = currentPlayer();
-      const tile = gameState.board[player.position];
+    // BUY
+    if (data.type === "buy") {
+      const p = players[ws.playerId];
+      const tile = board[p.position];
 
-      if (!tile.owner && tile.price > 0 && player.money >= tile.price) {
-        player.money -= tile.price;
-        tile.owner = player.id;
-        player.properties.push(tile.id);
+      if (tile.price && !tile.owner && p.money >= tile.price) {
+        p.money -= tile.price;
+        tile.owner = p.id;
+        broadcast({ type: "update", players, board });
       }
-
-      broadcast({ type: "STATE", gameState });
     }
-  });
-
-  ws.on("close", () => {
-    delete gameState.players[ws.id];
-    gameState.order = gameState.order.filter(id => id !== ws.id);
-    broadcast({ type: "STATE", gameState });
   });
 });
 
-server.listen(process.env.PORT || 3000);
 console.log("Server running");
