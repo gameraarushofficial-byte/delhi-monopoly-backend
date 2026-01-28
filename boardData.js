@@ -1,27 +1,12 @@
-module.exports = {
-  GO_BONUS: 1500,
-  JAIL_FINE: 300,
-
-  tiles: [
-    { id: 0, type: "GO", name: "GO" },
-
-    { id: 1, type: "PROPERTY", name: "Saket", price: 3200, rent: 260, group: "orange" },
-    { id: 2, type: "CHANCE", name: "Chance" },
-    { id: 3, type: "PROPERTY", name: "Hauz Khas", price: 3400, rent: 300, group: "orange" },
-
-    { id: 4, type: "TAX", name: "Income Tax", amount: 400 },
-
-    { id: 5, type: "JAIL_VISIT", name: "Tihar Jail" },
-
-    { id: 6, type: "PROPERTY", name: "Laxmi Nagar", price: 2800, rent: 220, group: "blue" },
-    { id: 7, type: "CHANCE", name: "Chance" },
-    { id: 8, type: "PROPERTY", name: "Shahdara", price: 3000, rent: 250, group: "blue" },
-
-    { id: 9, type: "FREE", name: "MCD Parking" },
-
-    { id: 10, type: "GO_TO_JAIL", name: "Go To Tihar Jail" },
-
-    // (Pattern continues until 39 – expandable)
-  ]
-};
-
+export const board = [
+  { id: 0, name: "GO", type: "go" },
+  { id: 1, name: "Saket", price: 1200, rent: 200, owner: null },
+  { id: 2, name: "Chance", type: "chance" },
+  { id: 3, name: "Lajpat Nagar", price: 1400, rent: 220, owner: null },
+  { id: 4, name: "Tax", type: "tax", amount: 200 },
+  { id: 5, name: "South Extension", price: 1800, rent: 300, owner: null },
+  { id: 6, name: "Jail", type: "jail" },
+  { id: 7, name: "Karol Bagh", price: 2000, rent: 350, owner: null },
+  { id: 8, name: "Chance", type: "chance" },
+  { id: 9, name: "Rajouri Garden", price: 2200, rent: 380, owner: null }
+];
